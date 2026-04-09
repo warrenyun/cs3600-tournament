@@ -8,3 +8,6 @@ __pycache__/
 # Local match outputs/logs
 3600-agents/matches/*.json
 game_log.txt
+
+# Submission zip (rebuild locally: cd 3600-agents && zip -r MyAgent.zip MyAgent -x '*/__pycache__/*' -x '*.pyc')
+3600-agents/*.zip

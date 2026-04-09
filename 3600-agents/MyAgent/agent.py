@@ -3,7 +3,7 @@ from typing import Tuple, Optional
 from collections import deque
 
 from game import board, move, enums
-from game.enums import Direction, MoveType, Cell, BOARD_SIZE, CARPET_POINTS_TABLE
+from game.enums import Direction, Cell, CARPET_POINTS_TABLE
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +188,11 @@ class PlayerAgent:
         if plain:
             return plain
 
-        # 7. Absolute last resort: use get_valid_moves to find anything legal
-        valid = board_state.get_valid_moves()
+        # 7. Any legal move (include search if movement is impossible)
+        valid = board_state.get_valid_moves(exclude_search=True)
         if valid:
             return valid[0]
-
-        # Should never reach here, but if we do, plain step up
-        return move.Move.plain(Direction.UP)
+        valid_all = board_state.get_valid_moves(exclude_search=False)
+        if valid_all:
+            return valid_all[0]
+        return move.Move.search((0, 0))
