@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local match outputs/logs
+3600-agents/matches/*.json
+game_log.txt
