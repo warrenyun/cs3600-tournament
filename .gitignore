@@ -11,3 +11,11 @@ game_log.txt
 
 # Submission zip (rebuild locally: cd 3600-agents && zip -r MyAgent.zip MyAgent -x '*/__pycache__/*' -x '*.pyc')
 3600-agents/*.zip
+
+# Finder / local duplicates (not packages)
+3600-agents/MyAgent 2/
+3600-agents/MyAgent 3/
+3600-agents/MyAgent/Archive.zip
+3600-agents/MyAgent/Archive/
+3600-agents/VegaAgent/Archive.zip
+3600-agents/VegaAgent/Archive/

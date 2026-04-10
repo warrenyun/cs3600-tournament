@@ -8,7 +8,7 @@ from game import move, enums
 from game.enums import Cell, CARPET_POINTS_TABLE, Direction, Noise, BOARD_SIZE
 
 
-# MyAgent v2: HMM + line-carpet plans + opportunistic search (see assignment).
+# VegaAgent: MyAgent planner + slightly greedier search (A/B).: HMM + line-carpet plans + opportunistic search (see assignment).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,7 +504,7 @@ class PlayerAgent:
 
         # 2. Rat search when EV > best certain floor gain
         about_to_carpet = self.plan is not None and self.plan.step > self.plan.k
-        if not about_to_carpet and self._search_cd == 0 and t > 1.0 and turns > 1:
+        if not about_to_carpet and self._search_cd == 0 and t > 0.9 and turns > 1:
             sr = self.hmm.best_search()
             if sr is not None:
                 loc, ev = sr
@@ -512,7 +512,7 @@ class PlayerAgent:
                     2.0,
                     float(CARPET_POINTS_TABLE.get(c.roll_length, 0)) if c else 0.0,
                 )
-                if ev > best_floor - 0.25:
+                if ev > best_floor - 0.35:
                     return move.Move.search(loc)
 
         # 3. Continue existing plan
