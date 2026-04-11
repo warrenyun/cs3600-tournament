@@ -8,11 +8,7 @@ from game import move, enums
 from game.enums import Cell, CARPET_POINTS_TABLE, Direction, Noise, BOARD_SIZE
 
 
-# MyAgent v2: HMM + line-carpet plans + opportunistic search (see assignment).
-# Navigation uses BFS distances on the real walkability graph (not Manhattan);
-# among equal-length shortest paths, prefer steps that increase distance from the
-# opponent worker. Full expectiminimax over rat + opponent explodes; the HMM
-# handles rat uncertainty, and this tie-break adds light deterministic avoidance.
+# VegaAgent: MyAgent planner + slightly greedier search (A/B).: HMM + line-carpet plans + opportunistic search (see assignment).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,44 +52,6 @@ def _dist(a: Tuple[int, int], b: Tuple[int, int]) -> int:
 
 def _step(loc: Tuple[int, int], d: Direction) -> Tuple[int, int]:
     return enums.loc_after_direction(loc, d)
-
-
-def _shortest_path_len(bs, fr: Tuple[int, int], to: Tuple[int, int]) -> Optional[int]:
-    """Plain-move shortest path length; None if unreachable."""
-    if fr == to:
-        return 0
-    dist = {fr: 0}
-    q = deque([fr])
-    while q:
-        loc = q.popleft()
-        w = dist[loc] + 1
-        for d in Direction:
-            nxt = _step(loc, d)
-            if bs.is_cell_blocked(nxt):
-                continue
-            if nxt not in dist:
-                if nxt == to:
-                    return w
-                dist[nxt] = w
-                q.append(nxt)
-    return None
-
-
-def _forward_dist_map(bs, start: Tuple[int, int]) -> dict:
-    """Shortest plain distance from start to every reachable cell."""
-    dist = {start: 0}
-    q = deque([start])
-    while q:
-        loc = q.popleft()
-        w = dist[loc] + 1
-        for d in Direction:
-            nxt = _step(loc, d)
-            if bs.is_cell_blocked(nxt):
-                continue
-            if nxt not in dist:
-                dist[nxt] = w
-                q.append(nxt)
-    return dist
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -294,9 +252,7 @@ def _find_plan(bs, min_k: int = 3) -> Optional[_Plan]:
                     continue
 
                 k = min(7, len(cells) - 1)
-                nav = _shortest_path_len(bs, worker, cells[0])
-                if nav is None:
-                    continue
+                nav = _dist(worker, cells[0])
 
                 while k >= min_k and nav + k + 1 > turns:
                     k -= 1
@@ -383,89 +339,45 @@ def _best_prime(bs) -> Optional[move.Move]:
 
 
 def _bfs_move(bs, target: Tuple[int, int]) -> Optional[move.Move]:
-    """
-    One step along a shortest plain path to target.
-    Tie-break (deterministic): among shortest-path first steps, prefer moving
-    farther from the opponent; then Direction order UP, RIGHT, DOWN, LEFT.
-
-    Uses forward BFS from the player (reverse-from-goal is wrong here because
-    the current cell is blocked for entry under is_cell_blocked).
-    """
+    """One BFS step toward target (plain move). Returns None if unreachable."""
     start = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
 
     if start == target:
         return None
 
-    ds = _forward_dist_map(bs, start)
-    L = ds.get(target)
-    if L is None or L < 1:
-        return None
-
-    best_d: Optional[Direction] = None
-    best_key: Optional[Tuple[int, int]] = None
-
-    for d in Direction:
-        nxt = _step(start, d)
-        if bs.is_cell_blocked(nxt) or ds.get(nxt) != 1:
-            continue
-        rest = _shortest_path_len(bs, nxt, target)
-        if rest is None or 1 + rest != L:
-            continue
-        key = (_dist(nxt, opp), -int(d))
-        if best_key is None or key > best_key:
-            best_key = key
-            best_d = d
-
-    return move.Move.plain(best_d) if best_d is not None else None
-
-
-def _layered_reach(
-    bs,
-    start: Tuple[int, int],
-    opp: Tuple[int, int],
-    passable: Callable[[Tuple[int, int]], bool],
-    goal_pred: Callable[[Tuple[int, int]], bool],
-) -> Optional[move.Move]:
-    """
-    Shortest plain path (via passable) to any cell satisfying goal_pred.
-    Among ties, prefer first step with larger separation from opp, then Direction order.
-    """
-    if goal_pred(start):
-        return None
-
     visited = {start}
-    frontier: List[Tuple[Tuple[int, int], Direction]] = []
+    q = deque()
+
     for d in Direction:
         nxt = _step(start, d)
-        if passable(nxt):
-            frontier.append((nxt, d))
+        if bs.is_valid_cell(nxt) and not bs.is_cell_blocked(nxt) and nxt != opp:
+            q.append((nxt, d))
             visited.add(nxt)
 
-    while frontier:
-        hits: List[Direction] = []
-        nxt_frontier: List[Tuple[Tuple[int, int], Direction]] = []
-        for loc, first_dir in frontier:
-            if goal_pred(loc):
-                hits.append(first_dir)
-            else:
-                for d in Direction:
-                    n2 = _step(loc, d)
-                    if n2 not in visited and passable(n2):
-                        visited.add(n2)
-                        nxt_frontier.append((n2, first_dir))
-        if hits:
-            best = max(hits, key=lambda fd: (_dist(_step(start, fd), opp), -int(fd)))
-            return move.Move.plain(best)
-        frontier = nxt_frontier
+    while q:
+        loc, first_dir = q.popleft()
+        if loc == target:
+            return move.Move.plain(first_dir)
+
+        for d in Direction:
+            nxt = _step(loc, d)
+            if (
+                nxt not in visited
+                and bs.is_valid_cell(nxt)
+                and not bs.is_cell_blocked(nxt)
+                and nxt != opp
+            ):
+                visited.add(nxt)
+                q.append((nxt, first_dir))
 
     return None
 
 
 def _move_toward_space(bs) -> Optional[move.Move]:
     """
-    Shortest path to a SPACE with ≥2 SPACE neighbours; else to any SPACE.
-    Tie-break: farther from opponent after first step, then Direction order.
+    BFS toward nearest SPACE cell with ≥2 SPACE neighbours.
+    Falls back to any SPACE cell if none found.
     """
     start = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
@@ -493,14 +405,48 @@ def _move_toward_space(bs) -> Optional[move.Move]:
     if good_prime_spot(start):
         return None
 
-    m = _layered_reach(bs, start, opp, passable, good_prime_spot)
-    if m is not None:
-        return m
+    visited = {start}
+    q = deque()
 
-    def any_space(loc: Tuple[int, int]) -> bool:
-        return bs.get_cell(loc) == Cell.SPACE
+    for d in Direction:
+        nxt = _step(start, d)
+        if passable(nxt):
+            q.append((nxt, d))
+            visited.add(nxt)
 
-    return _layered_reach(bs, start, opp, passable, any_space)
+    while q:
+        loc, first_dir = q.popleft()
+        if good_prime_spot(loc):
+            return move.Move.plain(first_dir)
+
+        for d in Direction:
+            nxt = _step(loc, d)
+            if nxt not in visited and passable(nxt):
+                visited.add(nxt)
+                q.append((nxt, first_dir))
+
+    # Fallback: navigate toward any SPACE cell
+    visited2 = {start}
+    q2 = deque()
+
+    for d in Direction:
+        nxt = _step(start, d)
+        if passable(nxt):
+            q2.append((nxt, d))
+            visited2.add(nxt)
+
+    while q2:
+        loc, first_dir = q2.popleft()
+        if bs.get_cell(loc) == Cell.SPACE:
+            return move.Move.plain(first_dir)
+
+        for d in Direction:
+            nxt = _step(loc, d)
+            if nxt not in visited2 and passable(nxt):
+                visited2.add(nxt)
+                q2.append((nxt, first_dir))
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +504,7 @@ class PlayerAgent:
 
         # 2. Rat search when EV > best certain floor gain
         about_to_carpet = self.plan is not None and self.plan.step > self.plan.k
-        if not about_to_carpet and self._search_cd == 0 and t > 1.0 and turns > 1:
+        if not about_to_carpet and self._search_cd == 0 and t > 0.9 and turns > 1:
             sr = self.hmm.best_search()
             if sr is not None:
                 loc, ev = sr
@@ -566,7 +512,7 @@ class PlayerAgent:
                     2.0,
                     float(CARPET_POINTS_TABLE.get(c.roll_length, 0)) if c else 0.0,
                 )
-                if ev > best_floor - 0.25:
+                if ev > best_floor - 0.35:
                     return move.Move.search(loc)
 
         # 3. Continue existing plan
