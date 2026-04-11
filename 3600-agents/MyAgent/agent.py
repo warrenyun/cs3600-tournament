@@ -377,6 +377,7 @@ class PlayerAgent:
         self._search_cd = 0
         self._opp_prev: Optional[Tuple[int, int]] = None
         self._nav_ghost: Optional[Tuple[int, int]] = None
+        self._search_miss_streak = 0
 
     def commentate(self):
         return ""
@@ -405,9 +406,14 @@ class PlayerAgent:
         if my_hit:
             self.hmm.reset()
             self._search_cd = 0
+            self._search_miss_streak = 0
         elif my_loc is not None:
             self.hmm.miss(my_loc)
-            self._search_cd = 1
+            # Consecutive search-miss turns only (board work clears the chain).
+            self._search_miss_streak = min(self._search_miss_streak + 1, 8)
+            self._search_cd = 2 if self._search_miss_streak >= 2 else 1
+        else:
+            self._search_miss_streak = 0
         if self._search_cd > 0:
             self._search_cd -= 1
 
@@ -434,12 +440,22 @@ class PlayerAgent:
         peak = float(np.max(self.hmm.b))
         t_need = 0.82 if turns <= 14 else 1.0
         margin = 0.32 if (turns >= 22 and peak > 0.42) else 0.25
+        # Tighter EV bar after recent search misses (each −2 hurts); looser if behind on points.
+        margin -= min(0.09, 0.045 * float(self._search_miss_streak))
+        pd = bs.player_worker.get_points() - bs.opponent_worker.get_points()
+        if pd <= -3:
+            margin += 0.06
+        elif pd >= 5:
+            margin -= 0.05
+        margin = max(0.1, min(0.42, margin))
         if not about_to_carpet and self._search_cd == 0 and t > t_need and turns > 1:
             sr = self.hmm.best_search()
             if sr is not None:
                 loc, ev = sr
                 bf = max(2.0, float(CARPET_POINTS_TABLE.get(c.roll_length, 0)) if c else 0.0)
-                if ev > bf - margin:
+                if self._search_miss_streak >= 2 and peak < 0.44:
+                    pass
+                elif ev > bf - margin:
                     return move.Move.search(loc)
 
         if self.plan is not None:
