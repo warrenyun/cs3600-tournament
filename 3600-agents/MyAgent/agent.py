@@ -5,10 +5,10 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from game import move, enums
-from game.enums import Cell, CARPET_POINTS_TABLE, Direction, Noise, BOARD_SIZE
+from game.enums import Cell, CARPET_POINTS_TABLE, Direction, MoveType, Noise, BOARD_SIZE
 
-# HMM rat belief + straight-line carpet plans + search. Navigation: one BFS helper,
-# graph-accurate distances; tie-break = dist to opp + 0.35 * dist to momentum-predicted cell.
+# HMM + carpet plans + search. Nav: BFS + ghost tie-break; optional 1-ply minimax on
+# equal-length path ties when time_left() >= _MM_TIME (forecast_move / reverse_perspective).
 
 _NOISE_P = {
     Cell.BLOCKED: (0.50, 0.30, 0.20),
@@ -25,7 +25,9 @@ _OPP_DIR = {
 }
 _GHOST_W = 0.35
 _PLAN_OPP_BONUS = 0.04
-_PLAN_GHOST_BONUS = 0.028  # extra weight for line start away from predicted opp cell
+_PLAN_GHOST_BONUS = 0.028
+_MM_TIME = 18.0  # seconds left before we spend CPU on nav minimax
+_MM_OPP_CAP = 16  # max opponent PLAIN/PRIME replies evaluated per candidate step
 
 
 def _idx(loc: Tuple[int, int]) -> int:
@@ -125,6 +127,7 @@ class _Plan:
     def __init__(self, cells: List[Tuple[int, int]], direction: Direction, k: int):
         self.cells, self.d, self.k, self.step = cells, direction, k, 0
         self.nav_ghost: Optional[Tuple[int, int]] = None
+        self.tl_cb: Optional[Callable[[], float]] = None
 
     def next_move(self, bs) -> Optional[move.Move]:
         wk, opp = bs.player_worker.get_location(), bs.opponent_worker.get_location()
@@ -135,7 +138,7 @@ class _Plan:
             if wk == t0:
                 self.step = 1
                 return self.next_move(bs)
-            return _bfs_move(bs, t0, self.nav_ghost)
+            return _bfs_move(bs, t0, self.nav_ghost, self.tl_cb)
         if self.step <= self.k:
             if wk != self.cells[self.step - 1] or bs.get_cell(wk) != Cell.SPACE:
                 return None
@@ -238,7 +241,23 @@ def _best_prime(bs) -> Optional[move.Move]:
     return best_mv
 
 
-def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = None) -> Optional[move.Move]:
+def _nav_pick_heuristic(cands: List[Direction], start, opp, ghost) -> Direction:
+    best_d, best_k = None, None
+    for d in cands:
+        nxt = _step(start, d)
+        k = (_dist(nxt, opp) + (_GHOST_W * _dist(nxt, ghost) if ghost else 0), -int(d))
+        if best_k is None or k > best_k:
+            best_k, best_d = k, d
+    assert best_d is not None
+    return best_d
+
+
+def _bfs_move(
+    bs,
+    target: Tuple[int, int],
+    ghost: Optional[Tuple[int, int]] = None,
+    tl: Optional[Callable[[], float]] = None,
+) -> Optional[move.Move]:
     start = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
     if start == target:
@@ -247,7 +266,7 @@ def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = No
     L = ds.get(target)
     if L is None or L < 1:
         return None
-    best_d, best_key = None, None
+    cands: List[Direction] = []
     for d in Direction:
         nxt = _step(start, d)
         if bs.is_cell_blocked(nxt) or ds.get(nxt) != 1:
@@ -255,10 +274,35 @@ def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = No
         rest = _path_len(bs, nxt, target)
         if rest is None or 1 + rest != L:
             continue
-        key = (_dist(nxt, opp) + (_GHOST_W * _dist(nxt, ghost) if ghost else 0), -int(d))
-        if best_key is None or key > best_key:
-            best_key, best_d = key, d
-    return move.Move.plain(best_d) if best_d is not None else None
+        cands.append(d)
+    if not cands:
+        return None
+    if len(cands) == 1 or tl is None or tl() < _MM_TIME:
+        return move.Move.plain(_nav_pick_heuristic(cands, start, opp, ghost))
+    best_d, best_w = None, -10**9
+    for d in cands:
+        b1 = bs.forecast_move(move.Move.plain(d))
+        if b1 is None:
+            continue
+        b1.reverse_perspective()
+        oms = [
+            om
+            for om in b1.get_valid_moves(exclude_search=True)
+            if om.move_type in (MoveType.PLAIN, MoveType.PRIME)
+        ][: _MM_OPP_CAP]
+        worst = 10**9
+        for om in oms:
+            b2 = b1.forecast_move(om)
+            if b2 is None:
+                continue
+            b2.reverse_perspective()
+            v = b2.player_worker.get_points() - b2.opponent_worker.get_points()
+            worst = min(worst, v)
+        if worst < 10**9 and worst > best_w:
+            best_w, best_d = worst, d
+    if best_d is not None:
+        return move.Move.plain(best_d)
+    return move.Move.plain(_nav_pick_heuristic(cands, start, opp, ghost))
 
 
 def _layered_reach(
@@ -399,6 +443,7 @@ class PlayerAgent:
                     return move.Move.search(loc)
 
         if self.plan is not None:
+            self.plan.tl_cb = time_left
             mv = self.plan.next_move(bs)
             if mv is not None:
                 return mv
@@ -409,6 +454,7 @@ class PlayerAgent:
             np_ = _find_plan(bs, min_k=mk, ghost=self._nav_ghost)
             if np_ is not None:
                 self.plan = np_
+                self.plan.tl_cb = time_left
                 mv = self.plan.next_move(bs)
                 if mv is not None:
                     return mv

@@ -7,7 +7,7 @@ import numpy as np
 from game import move, enums
 from game.enums import Cell, CARPET_POINTS_TABLE, Direction, MoveType, Noise, BOARD_SIZE
 
-# SageAgent folder synced to MyAgent policy (legacy name kept for local benches).
+# ArcAgent: same code as MyAgent (second zip name for scrimmages).
 # HMM + carpet plans + search. Nav: BFS + ghost tie-break; optional 1-ply minimax on
 # equal-length path ties when time_left() >= _MM_TIME (forecast_move / reverse_perspective).
 
