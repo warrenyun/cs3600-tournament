@@ -24,7 +24,8 @@ _OPP_DIR = {
     Direction.RIGHT: Direction.LEFT,
 }
 _GHOST_W = 0.35
-_PLAN_OPP_BONUS = 0.04  # prefer line starts slightly farther from opponent (multiplicative)
+_PLAN_OPP_BONUS = 0.04
+_PLAN_GHOST_BONUS = 0.028  # extra weight for line start away from predicted opp cell
 
 
 def _idx(loc: Tuple[int, int]) -> int:
@@ -157,7 +158,7 @@ class _Plan:
         return move.Move.carpet(_OPP_DIR[self.d], run)
 
 
-def _find_plan(bs, min_k: int = 3) -> Optional[_Plan]:
+def _find_plan(bs, min_k: int = 3, ghost: Optional[Tuple[int, int]] = None) -> Optional[_Plan]:
     worker = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
     turns = bs.player_worker.turns_left
@@ -185,6 +186,8 @@ def _find_plan(bs, min_k: int = 3) -> Optional[_Plan]:
                     continue
                 pts = k + CARPET_POINTS_TABLE[k]
                 away = 1.0 + _PLAN_OPP_BONUS * min(6, _dist(cells[0], opp))
+                if ghost is not None:
+                    away *= 1.0 + _PLAN_GHOST_BONUS * min(5, _dist(cells[0], ghost))
                 score = pts * away / (nav + k + 1)
                 if score > best_score:
                     best_score, best_plan = score, _Plan(cells[: k + 1], d, k)
@@ -360,7 +363,7 @@ class PlayerAgent:
             self._search_cd = 0
         elif my_loc is not None:
             self.hmm.miss(my_loc)
-            self._search_cd = 2
+            self._search_cd = 1
         if self._search_cd > 0:
             self._search_cd -= 1
 
@@ -384,12 +387,15 @@ class PlayerAgent:
             return c
 
         about_to_carpet = self.plan is not None and self.plan.step > self.plan.k
-        if not about_to_carpet and self._search_cd == 0 and t > 1.0 and turns > 1:
+        peak = float(np.max(self.hmm.b))
+        t_need = 0.82 if turns <= 14 else 1.0
+        margin = 0.32 if (turns >= 22 and peak > 0.42) else 0.25
+        if not about_to_carpet and self._search_cd == 0 and t > t_need and turns > 1:
             sr = self.hmm.best_search()
             if sr is not None:
                 loc, ev = sr
                 bf = max(2.0, float(CARPET_POINTS_TABLE.get(c.roll_length, 0)) if c else 0.0)
-                if ev > bf - 0.25:
+                if ev > bf - margin:
                     return move.Move.search(loc)
 
         if self.plan is not None:
@@ -400,7 +406,7 @@ class PlayerAgent:
 
         mk = 2 if turns < 16 else 3
         if turns >= mk + 2:
-            np_ = _find_plan(bs, min_k=mk)
+            np_ = _find_plan(bs, min_k=mk, ghost=self._nav_ghost)
             if np_ is not None:
                 self.plan = np_
                 mv = self.plan.next_move(bs)
