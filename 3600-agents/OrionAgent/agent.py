@@ -8,9 +8,10 @@ from game import move, enums
 from game.enums import Cell, CARPET_POINTS_TABLE, Direction, Noise, BOARD_SIZE
 
 
-# MyAgent v2: HMM + line-carpet plans + opportunistic search (see assignment).
-# Navigation: real-graph BFS distances; tie-break uses opponent separation plus a
-# one-step momentum prediction of where their worker is heading (clamped), no ML.
+# OrionAgent: MyAgent + opponent motion model for navigation.
+# Remembers last opponent cell; predicts one-step continuation (clamped delta)
+# and blends that "ghost" into path tie-breaks so we drift away from where the
+# other worker is heading — no ML, deterministic.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +36,7 @@ _OPP_DIR = {
     Direction.RIGHT: Direction.LEFT,
 }
 
-_GHOST_W = 0.35
+_GHOST_W = 0.35  # weight for predicted opponent cell in nav tie-breaks
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -393,7 +394,8 @@ def _best_prime(bs) -> Optional[move.Move]:
 def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = None) -> Optional[move.Move]:
     """
     One step along a shortest plain path to target.
-    Tie-break: separation from opponent + weighted separation from predicted next opp cell.
+    Tie-break: maximize separation from opponent + weighted separation from
+    predicted next opponent cell (ghost); then Direction order.
     """
     start = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
@@ -434,7 +436,7 @@ def _layered_reach(
 ) -> Optional[move.Move]:
     """
     Shortest plain path (via passable) to any cell satisfying goal_pred.
-    Tie-break: opponent + optional predicted opp cell (ghost).
+    Tie-break uses opponent + optional ghost (predicted opp cell).
     """
     if goal_pred(start):
         return None

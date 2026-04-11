@@ -19,3 +19,8 @@ game_log.txt
 3600-agents/MyAgent/Archive/
 3600-agents/VegaAgent/Archive.zip
 3600-agents/VegaAgent/Archive/
+3600-agents/OrionAgent/Archive/
+3600-agents/OrionAgent/Archive*.zip
+3600-agents/SageAgent/Archive/
+3600-agents/SageAgent/Archive*.zip
+3600-agents/MyAgent/Archive*.zip

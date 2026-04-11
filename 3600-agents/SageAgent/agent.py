@@ -5,12 +5,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from game import move, enums
-from game.enums import Cell, CARPET_POINTS_TABLE, Direction, Noise, BOARD_SIZE
+from game.enums import Cell, CARPET_POINTS_TABLE, Direction, MoveType, Noise, BOARD_SIZE
 
 
-# MyAgent v2: HMM + line-carpet plans + opportunistic search (see assignment).
-# Navigation: real-graph BFS distances; tie-break uses opponent separation plus a
-# one-step momentum prediction of where their worker is heading (clamped), no ML.
+# SageAgent: MyAgent + shallow 1-ply minimax on navigation (assignment §6 forecast_move / reverse_perspective).
+# Navigation uses BFS distances on the real walkability graph (not Manhattan);
+# among equal-length shortest paths, prefer steps that increase distance from the
+# opponent worker. Full expectiminimax over rat + opponent explodes; the HMM
+# handles rat uncertainty, and this tie-break adds light deterministic avoidance.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,8 +37,6 @@ _OPP_DIR = {
     Direction.RIGHT: Direction.LEFT,
 }
 
-_GHOST_W = 0.35
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tiny utilities
@@ -56,13 +56,6 @@ def _dist(a: Tuple[int, int], b: Tuple[int, int]) -> int:
 
 def _step(loc: Tuple[int, int], d: Direction) -> Tuple[int, int]:
     return enums.loc_after_direction(loc, d)
-
-
-def _nav_sep(nxt: Tuple[int, int], opp: Tuple[int, int], ghost: Optional[Tuple[int, int]]) -> float:
-    s = float(_dist(nxt, opp))
-    if ghost is not None:
-        s += _GHOST_W * float(_dist(nxt, ghost))
-    return s
 
 
 def _shortest_path_len(bs, fr: Tuple[int, int], to: Tuple[int, int]) -> Optional[int]:
@@ -222,7 +215,7 @@ class _Plan:
         self.d = direction
         self.k = k
         self.step = 0
-        self.nav_ghost: Optional[Tuple[int, int]] = None
+        self.tl_cb: Optional[Callable] = None
 
     def next_move(self, bs) -> Optional[move.Move]:
         worker = bs.player_worker.get_location()
@@ -236,7 +229,7 @@ class _Plan:
             if worker == target:
                 self.step = 1
                 return self.next_move(bs)
-            return _bfs_move(bs, target, self.nav_ghost)
+            return _bfs_move(bs, target, self.tl_cb)
 
         # Phase 1..k: prime steps
         if self.step <= self.k:
@@ -390,10 +383,15 @@ def _best_prime(bs) -> Optional[move.Move]:
     return best_mv
 
 
-def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = None) -> Optional[move.Move]:
+def _bfs_move(
+    bs,
+    target: Tuple[int, int],
+    time_left_fn: Optional[Callable[[], float]] = None,
+    minimax_time_floor: float = 20.0,
+) -> Optional[move.Move]:
     """
-    One step along a shortest plain path to target.
-    Tie-break: separation from opponent + weighted separation from predicted next opp cell.
+    Shortest plain path toward target. If multiple first steps tie on length and
+    we have CPU budget, pick the one with best worst-case score vs opponent PLAIN/PRIME replies.
     """
     start = bs.player_worker.get_location()
     opp = bs.opponent_worker.get_location()
@@ -406,9 +404,7 @@ def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = No
     if L is None or L < 1:
         return None
 
-    best_d: Optional[Direction] = None
-    best_key: Optional[Tuple[float, int]] = None
-
+    cand_dirs: List[Direction] = []
     for d in Direction:
         nxt = _step(start, d)
         if bs.is_cell_blocked(nxt) or ds.get(nxt) != 1:
@@ -416,12 +412,60 @@ def _bfs_move(bs, target: Tuple[int, int], ghost: Optional[Tuple[int, int]] = No
         rest = _shortest_path_len(bs, nxt, target)
         if rest is None or 1 + rest != L:
             continue
-        key = (_nav_sep(nxt, opp, ghost), -int(d))
-        if best_key is None or key > best_key:
-            best_key = key
+        cand_dirs.append(d)
+
+    if not cand_dirs:
+        return None
+
+    def heuristic_pick(dirs: List[Direction]) -> Direction:
+        best_d: Optional[Direction] = None
+        best_key: Optional[Tuple[int, int]] = None
+        for d in dirs:
+            nxt = _step(start, d)
+            key = (_dist(nxt, opp), -int(d))
+            if best_key is None or key > best_key:
+                best_key = key
+                best_d = d
+        assert best_d is not None
+        return best_d
+
+    use_mm = (
+        len(cand_dirs) >= 2
+        and time_left_fn is not None
+        and time_left_fn() >= minimax_time_floor
+    )
+    if not use_mm:
+        return move.Move.plain(heuristic_pick(cand_dirs))
+
+    best_d: Optional[Direction] = None
+    best_worst = -10**9
+    for d in cand_dirs:
+        m = move.Move.plain(d)
+        b1 = bs.forecast_move(m)
+        if b1 is None:
+            continue
+        b1.reverse_perspective()
+        opp_moves = [
+            om
+            for om in b1.get_valid_moves(exclude_search=True)
+            if om.move_type in (MoveType.PLAIN, MoveType.PRIME)
+        ]
+        opp_moves = opp_moves[:20]
+        worst = 10**9
+        for om in opp_moves:
+            b2 = b1.forecast_move(om)
+            if b2 is None:
+                continue
+            b2.reverse_perspective()
+            v = b2.player_worker.get_points() - b2.opponent_worker.get_points()
+            worst = min(worst, v)
+        if worst < 10**9 and worst > best_worst:
+            best_worst = worst
             best_d = d
 
-    return move.Move.plain(best_d) if best_d is not None else None
+    if best_d is not None:
+        return move.Move.plain(best_d)
+    return move.Move.plain(heuristic_pick(cand_dirs))
 
 
 def _layered_reach(
@@ -430,11 +474,10 @@ def _layered_reach(
     opp: Tuple[int, int],
     passable: Callable[[Tuple[int, int]], bool],
     goal_pred: Callable[[Tuple[int, int]], bool],
-    ghost: Optional[Tuple[int, int]] = None,
 ) -> Optional[move.Move]:
     """
     Shortest plain path (via passable) to any cell satisfying goal_pred.
-    Tie-break: opponent + optional predicted opp cell (ghost).
+    Among ties, prefer first step with larger separation from opp, then Direction order.
     """
     if goal_pred(start):
         return None
@@ -460,17 +503,14 @@ def _layered_reach(
                         visited.add(n2)
                         nxt_frontier.append((n2, first_dir))
         if hits:
-            best = max(
-                hits,
-                key=lambda fd: (_nav_sep(_step(start, fd), opp, ghost), -int(fd)),
-            )
+            best = max(hits, key=lambda fd: (_dist(_step(start, fd), opp), -int(fd)))
             return move.Move.plain(best)
         frontier = nxt_frontier
 
     return None
 
 
-def _move_toward_space(bs, ghost: Optional[Tuple[int, int]] = None) -> Optional[move.Move]:
+def _move_toward_space(bs) -> Optional[move.Move]:
     """
     Shortest path to a SPACE with ≥2 SPACE neighbours; else to any SPACE.
     Tie-break: farther from opponent after first step, then Direction order.
@@ -501,14 +541,14 @@ def _move_toward_space(bs, ghost: Optional[Tuple[int, int]] = None) -> Optional[
     if good_prime_spot(start):
         return None
 
-    m = _layered_reach(bs, start, opp, passable, good_prime_spot, ghost)
+    m = _layered_reach(bs, start, opp, passable, good_prime_spot)
     if m is not None:
         return m
 
     def any_space(loc: Tuple[int, int]) -> bool:
         return bs.get_cell(loc) == Cell.SPACE
 
-    return _layered_reach(bs, start, opp, passable, any_space, ghost)
+    return _layered_reach(bs, start, opp, passable, any_space)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -520,8 +560,6 @@ class PlayerAgent:
         self.hmm = _RatHMM(transition_matrix)
         self.plan: Optional[_Plan] = None
         self._search_cd = 0
-        self._opp_prev: Optional[Tuple[int, int]] = None
-        self._nav_ghost: Optional[Tuple[int, int]] = None
 
     def commentate(self):
         return ""
@@ -531,20 +569,6 @@ class PlayerAgent:
         noise, dist = sensor_data
         turns = bs.player_worker.turns_left
         t = time_left()
-
-        opp_now = bs.opponent_worker.get_location()
-        if self._opp_prev is not None:
-            dx = max(-1, min(1, opp_now[0] - self._opp_prev[0]))
-            dy = max(-1, min(1, opp_now[1] - self._opp_prev[1]))
-            self._nav_ghost = (
-                max(0, min(BOARD_SIZE - 1, opp_now[0] + dx)),
-                max(0, min(BOARD_SIZE - 1, opp_now[1] + dy)),
-            )
-        else:
-            self._nav_ghost = opp_now
-        self._opp_prev = opp_now
-        if self.plan is not None:
-            self.plan.nav_ghost = self._nav_ghost
 
         # HMM: our search info is about the belief *before* opponent's rat step this cycle.
         my_loc, my_hit = bs.player_search
@@ -595,6 +619,7 @@ class PlayerAgent:
 
         # 3. Continue existing plan
         if self.plan is not None:
+            self.plan.tl_cb = time_left
             mv = self.plan.next_move(bs)
             if mv is not None:
                 return mv
@@ -606,6 +631,7 @@ class PlayerAgent:
             new_plan = _find_plan(bs, min_k=mk)
             if new_plan is not None:
                 self.plan = new_plan
+                self.plan.tl_cb = time_left
                 mv = self.plan.next_move(bs)
                 if mv is not None:
                     return mv
@@ -621,7 +647,7 @@ class PlayerAgent:
             return p
 
         # 7. Navigate toward good priming territory
-        b = _move_toward_space(bs, self._nav_ghost)
+        b = _move_toward_space(bs)
         if b:
             return b
 
